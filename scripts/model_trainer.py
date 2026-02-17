@@ -115,6 +115,12 @@ def walk_forward_splits(
         logger.warning("DataFrame empty or no datetime index for walk-forward split")
         return []
 
+    # Strip timezone from index to avoid tz-aware vs tz-naive comparison errors
+    # (Kite returns tz-aware datetimes with pytz.FixedOffset(330) for IST)
+    if df.index.tz is not None:
+        df = df.copy()
+        df.index = df.index.tz_localize(None)
+
     dates = sorted(df.index.date)
     if not dates:
         return []

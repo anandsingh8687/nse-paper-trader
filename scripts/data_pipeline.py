@@ -554,10 +554,13 @@ def compute_features(symbol: str, date: str = None) -> pd.DataFrame:
     )
     df_5min["atr_14"] = atr.average_true_range()
 
-    # VWAP (cumulative intraday)
-    df_5min["vwap"] = (
-        (df_5min["close"] * df_5min["volume"]).cumsum() / df_5min["volume"].cumsum()
-    )
+    # VWAP (cumulative intraday, RESET DAILY)
+    # VWAP must reset each trading day — cumulative across months is meaningless
+    df_5min["_date"] = df_5min.index.date
+    df_5min["_cum_vol_price"] = (df_5min["close"] * df_5min["volume"]).groupby(df_5min["_date"]).cumsum()
+    df_5min["_cum_vol"] = df_5min["volume"].groupby(df_5min["_date"]).cumsum()
+    df_5min["vwap"] = df_5min["_cum_vol_price"] / df_5min["_cum_vol"].replace(0, np.nan)
+    df_5min.drop(columns=["_date", "_cum_vol_price", "_cum_vol"], inplace=True)
     df_5min["vwap_distance_pct"] = (
         (df_5min["close"] - df_5min["vwap"]) / df_5min["vwap"] * 100
     )
@@ -591,13 +594,66 @@ def compute_features(symbol: str, date: str = None) -> pd.DataFrame:
     df_5min["open_eq_low"] = (df_5min["open"] == df_5min["low"]).astype(int)
     df_5min["open_eq_high"] = (df_5min["open"] == df_5min["high"]).astype(int)
 
-    # Placeholders for external features (filled at inference time)
-    df_5min["gift_nifty_gap_pct"] = 0.0
-    df_5min["news_sentiment_score"] = 0.0
-    df_5min["oi_change_pct"] = 0.0
-    df_5min["vix_level"] = 0.0
-    df_5min["vix_change_pct"] = 0.0
-    df_5min["regime_label"] = 0  # 0=neutral, 1=trending, 2=ranging
+    # --- External features from database (VIX, OI) ---
+    # These were previously hardcoded to 0.0, causing the model to train on zeros.
+    df_5min["gift_nifty_gap_pct"] = 0.0  # Only available at live inference time
+
+    # VIX: merge daily VIX close into each 5-min bar by date
+    try:
+        vix_conn = sqlite3.connect(DB_PATH)
+        vix_df = pd.read_sql_query("SELECT date, close as vix_close FROM vix_daily", vix_conn)
+        vix_conn.close()
+        if not vix_df.empty:
+            vix_df["date"] = pd.to_datetime(vix_df["date"]).dt.date
+            df_5min["_bar_date"] = df_5min.index.date
+            vix_map = vix_df.set_index("date")["vix_close"].to_dict()
+            df_5min["vix_level"] = df_5min["_bar_date"].map(vix_map).ffill().fillna(15.0)
+            df_5min["vix_change_pct"] = df_5min["vix_level"].pct_change().fillna(0.0) * 100
+            df_5min.drop(columns=["_bar_date"], inplace=True)
+        else:
+            df_5min["vix_level"] = 15.0
+            df_5min["vix_change_pct"] = 0.0
+    except Exception:
+        df_5min["vix_level"] = 15.0
+        df_5min["vix_change_pct"] = 0.0
+
+    # OI change: merge daily OI into 5-min bars by date
+    try:
+        oi_conn = sqlite3.connect(DB_PATH)
+        oi_df = pd.read_sql_query(
+            "SELECT date, oi_change_pct FROM oi_daily WHERE symbol LIKE '%_CE'", oi_conn
+        )
+        oi_conn.close()
+        if not oi_df.empty:
+            oi_df["date"] = pd.to_datetime(oi_df["date"]).dt.date
+            df_5min["_bar_date"] = df_5min.index.date
+            oi_map = oi_df.groupby("date")["oi_change_pct"].mean().to_dict()
+            df_5min["oi_change_pct"] = df_5min["_bar_date"].map(oi_map).fillna(0.0)
+            df_5min.drop(columns=["_bar_date"], inplace=True)
+        else:
+            df_5min["oi_change_pct"] = 0.0
+    except Exception:
+        df_5min["oi_change_pct"] = 0.0
+
+    # News sentiment: merge daily sentiment score by date
+    try:
+        news_conn = sqlite3.connect(DB_PATH)
+        news_df = pd.read_sql_query(
+            "SELECT substr(timestamp, 1, 10) as date, sentiment_score FROM news_sentiment", news_conn
+        )
+        news_conn.close()
+        if not news_df.empty:
+            news_df["date"] = pd.to_datetime(news_df["date"]).dt.date
+            df_5min["_bar_date"] = df_5min.index.date
+            news_map = news_df.groupby("date")["sentiment_score"].mean().to_dict()
+            df_5min["news_sentiment_score"] = df_5min["_bar_date"].map(news_map).fillna(0.0)
+            df_5min.drop(columns=["_bar_date"], inplace=True)
+        else:
+            df_5min["news_sentiment_score"] = 0.0
+    except Exception:
+        df_5min["news_sentiment_score"] = 0.0
+
+    df_5min["regime_label"] = 0  # 0=neutral, 1=trending, 2=ranging (set by model at inference)
 
     df_5min.dropna(inplace=True)
     return df_5min

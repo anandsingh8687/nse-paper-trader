@@ -80,20 +80,34 @@ LOOKAHEAD_BARS = 6  # 6 x 5-min = 30 min lookahead for P(win) label
 # =============================================================================
 def generate_labels(df: pd.DataFrame, lookahead: int = LOOKAHEAD_BARS) -> pd.DataFrame:
     """
-    Create binary target: 1 if price moves up by > 0.08% (cost threshold)
-    within the next `lookahead` bars, 0 otherwise.
+    Create binary target: 1 if the NET return over the next `lookahead` bars
+    exceeds the cost threshold (profitable trade), 0 otherwise.
+
+    Uses close-to-close return (not max), which is more realistic for
+    actual trade P&L. The old approach (any bar exceeding 0.08%) produced
+    ~75% positive labels, making the model trivially biased.
 
     RULE: EV calculation accounts for ~0.08% costs/slippage.
     """
     cost_threshold = 0.0008  # 0.08% round-trip costs
 
-    future_max = df["close"].shift(-lookahead).rolling(lookahead).max()
-    df[TARGET_COL] = (
-        (future_max / df["close"] - 1) > cost_threshold
-    ).astype(int)
+    # Net return at lookahead horizon (close-to-close, not max)
+    future_close = df["close"].shift(-lookahead)
+    net_return = future_close / df["close"] - 1
+
+    # Also check downside: if max drawdown within window exceeds -1R (ATR),
+    # the trade would have been stopped out regardless of final close
+    # For simplicity, use net return as the primary signal
+    df[TARGET_COL] = (net_return > cost_threshold).astype(int)
 
     # Drop rows where we can't compute the target
     df.dropna(subset=[TARGET_COL], inplace=True)
+
+    # Log class balance for monitoring
+    if len(df) > 0:
+        pos_rate = df[TARGET_COL].mean()
+        logger.info(f"  Label balance: {pos_rate:.1%} positive, {1-pos_rate:.1%} negative")
+
     return df
 
 
@@ -184,7 +198,6 @@ def get_models() -> dict:
             min_child_weight=30, subsample=0.8, colsample_bytree=0.8,
             scale_pos_weight=1.0,  # Auto-balance later
             random_state=42, eval_metric="logloss",
-            use_label_encoder=False,
         ),
     }
 
@@ -209,14 +222,16 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) 
     # P(win) from model predictions on positive class
     p_win = y_prob[y_pred == 1].mean() if (y_pred == 1).any() else 0.0
 
-    # Simplified EV: P(win)*1R - P(loss)*1R = 2*accuracy - 1 (scaled)
-    # More accurate: use actual P/L from backtest, but this is model evaluation stage
+    # EV aligned with strategy_engine.compute_ev():
+    # EV = P(win) * avg_win_R - (1 - P(win)) * 1R - costs_R
+    # Using precision as P(win) (correct when we predict positive)
+    # avg_win = 0.8R (conservative, matching SCALE_OUT_TARGET_R)
     win_rate = precision  # Precision = how often we're right when we predict positive
-    loss_rate = 1 - win_rate
-    avg_win_r = 1.0   # Assume 1R target
-    avg_loss_r = 1.0   # Assume 1R stop loss
+    avg_win_r = 0.8    # RULE: Scale out at +0.8R (from strategy_engine)
+    avg_loss_r = 1.0   # RULE: Hard SL at -1R
+    costs_r = 0.08     # ~0.08% round-trip as fraction of 1R
 
-    ev = win_rate * avg_win_r - loss_rate * avg_loss_r
+    ev = win_rate * avg_win_r - (1 - win_rate) * avg_loss_r - costs_r
 
     # Sharpe approximation from prediction returns
     # Each correct prediction = +1R, incorrect = -1R
@@ -306,8 +321,14 @@ def train_and_evaluate() -> dict:
 
             # Scale features (important for Logistic Regression)
             scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
+            X_train_scaled = pd.DataFrame(
+                scaler.fit_transform(X_train),
+                columns=available_features, index=X_train.index
+            )
+            X_test_scaled = pd.DataFrame(
+                scaler.transform(X_test),
+                columns=available_features, index=X_test.index
+            )
 
             try:
                 model.fit(X_train_scaled, y_train)
@@ -385,7 +406,10 @@ def train_and_evaluate() -> dict:
     y_all = df[TARGET_COL]
 
     scaler = StandardScaler()
-    X_all_scaled = scaler.fit_transform(X_all)
+    X_all_scaled = pd.DataFrame(
+        scaler.fit_transform(X_all),
+        columns=available_features, index=X_all.index
+    )
 
     final_model = get_models()[best_model_name]
     final_model.fit(X_all_scaled, y_all)

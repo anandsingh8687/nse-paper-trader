@@ -5,6 +5,9 @@ Kimi 2.5 (Moonshot AI) Client Wrapper
 All LLM calls in the system go through this single module.
 Uses OpenAI-compatible SDK pointed at Moonshot's endpoint.
 
+IMPORTANT: Kimi K2.5 ONLY accepts temperature=1.0. Any other value
+returns HTTP 400. All calls must use temperature=1.0.
+
 Usage:
     from scripts.kimi_client import kimi_chat, kimi_sentiment, kimi_interpret
 =============================================================================
@@ -44,9 +47,9 @@ def _get_client() -> OpenAI:
 def kimi_chat(
     prompt: str,
     system_prompt: str = "You are a quantitative finance assistant for Indian NSE markets.",
-    temperature: float = 0.6,
     max_tokens: int = 2048,
     thinking: bool = False,
+    **kwargs,
 ) -> str:
     """
     General-purpose Kimi 2.5 chat completion.
@@ -54,36 +57,34 @@ def kimi_chat(
     Args:
         prompt: User message / question.
         system_prompt: System context.
-        temperature: 0.6 for instant mode (default), 1.0 for thinking mode.
         max_tokens: Max response length.
-        thinking: If True, uses thinking mode (temp 1.0, deeper reasoning).
+        thinking: If True, uses thinking mode (deeper reasoning).
+
+    NOTE: Kimi K2.5 only accepts temperature=1.0. This is hardcoded.
 
     Returns:
         String response from Kimi 2.5.
     """
     client = _get_client()
 
-    if thinking:
-        temperature = 1.0
-
-    kwargs = {
+    api_kwargs = {
         "model": "kimi-k2.5",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
-        "temperature": temperature,
+        "temperature": 1.0,  # K2.5 ONLY allows 1.0
         "max_tokens": max_tokens,
     }
 
     # Instant mode: disable thinking for faster responses
     if not thinking:
-        kwargs["extra_body"] = {
+        api_kwargs["extra_body"] = {
             "chat_template_kwargs": {"thinking": False}
         }
 
     try:
-        response = client.chat.completions.create(**kwargs)
+        response = client.chat.completions.create(**api_kwargs)
         msg = response.choices[0].message
         content = msg.content or ""
 
@@ -129,7 +130,7 @@ Headlines:
 
 Return ONLY the JSON object, no markdown or explanation."""
 
-    response = kimi_chat(prompt, temperature=0.3, max_tokens=1024)
+    response = kimi_chat(prompt, max_tokens=1024)
 
     try:
         # Strip markdown code fences if present
@@ -160,7 +161,7 @@ Results:
 
 Be concise (max 300 words). Focus on actionable insights."""
 
-    return kimi_chat(prompt, thinking=False, max_tokens=1024)
+    return kimi_chat(prompt, max_tokens=1024)
 
 
 def kimi_daily_brief(
@@ -209,4 +210,4 @@ Format as:
 
 Be direct. No fluff."""
 
-    return kimi_chat(prompt, temperature=0.4, max_tokens=1024)
+    return kimi_chat(prompt, max_tokens=1024)

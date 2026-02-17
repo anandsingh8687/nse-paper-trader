@@ -63,10 +63,23 @@ TEST_MONTHS = 1
 
 # Features defined in config/strategy_params.json
 FEATURE_COLS = [
+    # Technical indicators
     "rsi_14", "atr_14", "vwap_distance_pct", "volume_ratio_20",
     "bb_width_20", "macd_histogram", "adx_14",
-    "hour_of_day", "day_of_week",
-    "prev_close_return", "open_eq_low", "open_eq_high",
+    # Multi-timeframe momentum (high signal)
+    "mom_15min", "mom_1hr", "mom_3hr",
+    # Intraday session (high signal)
+    "return_from_open", "intraday_position", "dist_from_day_high_pct",
+    # Volatility regime
+    "realized_vol_20", "vol_regime_ratio",
+    # Bar patterns
+    "bar_body_ratio", "upper_shadow_ratio",
+    # Time features
+    "hour_of_day", "minute_of_day", "day_of_week",
+    # Lag features
+    "prev_close_return", "prev_2_close_return",
+    "open_eq_low", "open_eq_high",
+    # External
     "vix_level", "news_sentiment_score", "oi_change_pct",
 ]
 
@@ -404,6 +417,10 @@ def train_and_evaluate() -> dict:
             all_results,
             key=lambda k: all_results[k]["avg_metrics"]["sharpe"]
             + all_results[k]["avg_metrics"]["ev"],
+        )
+        best_score = (
+            all_results[best_model_name]["avg_metrics"]["sharpe"]
+            + all_results[best_model_name]["avg_metrics"]["ev"]
         )
         logger.warning("No model hit Sharpe threshold. Using best available.")
 

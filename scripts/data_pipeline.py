@@ -582,10 +582,57 @@ def compute_features(symbol: str, date: str = None) -> pd.DataFrame:
 
     # --- Time features ---
     df_5min["hour_of_day"] = df_5min.index.hour
+    df_5min["minute_of_day"] = df_5min.index.hour * 60 + df_5min.index.minute
     df_5min["day_of_week"] = df_5min.index.dayofweek
 
-    # --- Daily-level features (computed once per day, forward-filled) ---
-    df_5min["prev_close_return"] = df_5min["close"].pct_change()
+    # --- Multi-timeframe momentum (much more predictive than single-TF) ---
+    # 3-bar momentum (15 min)
+    df_5min["mom_15min"] = df_5min["close"].pct_change(3) * 100
+    # 12-bar momentum (1 hour)
+    df_5min["mom_1hr"] = df_5min["close"].pct_change(12) * 100
+    # 36-bar momentum (3 hours / half session)
+    df_5min["mom_3hr"] = df_5min["close"].pct_change(36) * 100
+
+    # --- Intraday session features (stronger signal than raw indicators) ---
+    df_5min["_date"] = df_5min.index.date
+    # Day open price (first bar of each day)
+    day_open = df_5min.groupby("_date")["open"].transform("first")
+    # Return since today's open
+    df_5min["return_from_open"] = ((df_5min["close"] - day_open) / day_open * 100)
+    # Running high/low of the day
+    day_high = df_5min.groupby("_date")["high"].transform("cummax")
+    day_low = df_5min.groupby("_date")["low"].transform("cummin")
+    day_range = day_high - day_low
+    # Where we are in today's range (0 = at day low, 1 = at day high)
+    df_5min["intraday_position"] = (
+        (df_5min["close"] - day_low) / day_range.replace(0, np.nan)
+    ).fillna(0.5)
+    # Distance from day high (how far we've pulled back)
+    df_5min["dist_from_day_high_pct"] = (
+        (df_5min["close"] - day_high) / day_high * 100
+    )
+    df_5min.drop(columns=["_date"], inplace=True)
+
+    # --- Volatility regime features ---
+    # Realized volatility (20-bar rolling std of returns, annualized)
+    df_5min["realized_vol_20"] = df_5min["close"].pct_change().rolling(20).std() * np.sqrt(252 * 75)
+    # Volatility ratio (current vs longer-term)
+    vol_short = df_5min["close"].pct_change().rolling(6).std()
+    vol_long = df_5min["close"].pct_change().rolling(36).std()
+    df_5min["vol_regime_ratio"] = (vol_short / vol_long.replace(0, np.nan)).fillna(1.0)
+
+    # --- Bar pattern features ---
+    bar_range = df_5min["high"] - df_5min["low"]
+    df_5min["bar_body_ratio"] = (
+        abs(df_5min["close"] - df_5min["open"]) / bar_range.replace(0, np.nan)
+    ).fillna(0.5)  # 1.0 = full body (strong), 0.0 = doji (indecision)
+    df_5min["upper_shadow_ratio"] = (
+        (df_5min["high"] - df_5min[["open", "close"]].max(axis=1)) / bar_range.replace(0, np.nan)
+    ).fillna(0.0)
+
+    # --- Previous bar returns (lag features) ---
+    df_5min["prev_close_return"] = df_5min["close"].pct_change() * 100
+    df_5min["prev_2_close_return"] = df_5min["close"].pct_change(2) * 100
 
     # Gap % (first bar of day vs prev day close)
     df_5min["gap_pct"] = 0.0  # Placeholder, computed in daily context

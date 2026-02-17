@@ -1,0 +1,25 @@
+# =============================================================================
+# Dockerfile for Strategy Engine service
+# Runs: data pipeline, model training, strategy execution, daily scheduler
+# =============================================================================
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl gcc g++ && \
+    rm -rf /var/lib/apt/lists/*
+
+# Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY scripts/ ./scripts/
+COPY config/ ./config/
+
+# Create data/model/log dirs
+RUN mkdir -p /app/data /app/models /app/logs
+
+CMD ["python", "scripts/daily_start.py"]

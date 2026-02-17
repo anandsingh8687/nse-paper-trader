@@ -1,0 +1,84 @@
+{
+  "_comment": "All strategy rules locked. Change only via weekly Kimi 2.5 review + manual approval.",
+
+  "model": {
+    "algorithms": ["logistic_regression", "random_forest", "lightgbm", "xgboost"],
+    "walk_forward_train_months": 4,
+    "walk_forward_test_months": 1,
+    "min_sharpe_threshold": 1.2,
+    "fallback_sharpe_threshold": 0.8,
+    "retrain_frequency_days": 7,
+    "feature_list": [
+      "rsi_14", "atr_14", "vwap_distance_pct", "volume_ratio_20",
+      "oi_change_pct", "vix_level", "vix_change_pct",
+      "hour_of_day", "day_of_week", "regime_label",
+      "prev_close_return", "gap_pct", "open_eq_low", "open_eq_high",
+      "gift_nifty_gap_pct", "news_sentiment_score",
+      "bb_width_20", "macd_histogram", "adx_14"
+    ]
+  },
+
+  "entry": {
+    "min_p_win": 0.60,
+    "min_ev_r": 0.4,
+    "cost_slippage_pct": 0.08,
+    "_rule": "Entry ONLY if P(win) >= 60% AND EV >= 0.4R after 0.08% costs"
+  },
+
+  "triggers": {
+    "momentum": {
+      "breakout_timeframe_min": 5,
+      "volume_multiplier": 1.8,
+      "volume_lookback_periods": 20,
+      "oi_direction": "rising",
+      "_rule": "5-min breakout + vol > 1.8x 20-period 5-min avg + OI rising"
+    },
+    "mean_reversion": {
+      "open_eq_low_or_high": true,
+      "vwap_band_pct": 0.2,
+      "_rule": "First 5-min candle Open=Low/High + price within VWAP +/- 0.2%"
+    },
+    "_alignment": "Regime match + (momentum OR mean-reversion) must all align"
+  },
+
+  "position_sizing": {
+    "base_risk_pct": 1.0,
+    "multipliers": {
+      "p_60_65": 1.0,
+      "p_65_72": 2.0,
+      "p_above_72": 3.0
+    },
+    "max_trades_per_day": 4,
+    "max_total_risk_pct": 3.0,
+    "_rule": "Base 1% risk. 1x at P 60-65%, 2x at 65-72%, 3x at >72%. Max 4 trades, 3% total."
+  },
+
+  "exits": {
+    "hard_sl_r": -1.0,
+    "sl_method": "atr_based",
+    "scale_out_pct": 50,
+    "scale_out_target_r": 0.8,
+    "trail_remaining": true,
+    "time_stop_hours": 2.5,
+    "auto_squareoff_time": "15:20",
+    "_rule": "Hard SL -1R (ATR). Scale 50% at +0.8R, trail rest. Time stop 2.5hrs. Auto close 3:20 PM IST."
+  },
+
+  "safety": {
+    "vix_skip_threshold": 25,
+    "vix_override_min_p": 0.75,
+    "max_daily_loss_pct": 2.0,
+    "shutdown_on_max_loss": true,
+    "budget_day_skip": true,
+    "expiry_day_skip": true,
+    "budget_expiry_override_min_p": 0.75,
+    "_rule": "No trade if VIX>25 unless P>75%. Max daily loss 2% -> shutdown. Skip budget/expiry days unless P>75%."
+  },
+
+  "opportunity_capture": {
+    "rank_by": "expected_value",
+    "max_executions": 4,
+    "min_executions": 2,
+    "_rule": "Rank all candidates by EV, trade only top 2-4."
+  }
+}

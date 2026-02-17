@@ -1,0 +1,99 @@
+# =============================================================================
+# NSE Paper Trading System - Docker Compose
+# Services: OpenAlgo (trading platform) + OpenClaw (AI assistant)
+# =============================================================================
+# Usage:
+#   docker-compose up -d          # Start all services
+#   docker-compose logs -f        # View logs
+#   docker-compose down           # Stop all services
+#   docker-compose up --build     # Rebuild and start
+# =============================================================================
+
+version: "3.8"
+
+services:
+  # ---------------------------------------------------------------------------
+  # OpenAlgo - Algorithmic Trading Platform (Flask + Zerodha Kite integration)
+  # Docs: https://docs.openalgo.in/
+  # Access: http://localhost:5000
+  # ---------------------------------------------------------------------------
+  openalgo:
+    build:
+      context: ./openalgo
+      dockerfile: Dockerfile
+    container_name: nse_openalgo
+    restart: unless-stopped
+    ports:
+      - "5000:5000"      # Web UI + API
+      - "5001:5001"      # WebSocket feed
+    env_file: .env
+    environment:
+      - FLASK_HOST_IP=0.0.0.0
+      - WEBSOCKET_HOST=0.0.0.0
+      - ZMQ_HOST=0.0.0.0
+    volumes:
+      - ./data:/app/data
+      - ./db:/app/db
+      - ./logs/openalgo:/app/logs
+    networks:
+      - trading_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # OpenClaw - AI Assistant (orchestrates Kimi 2.5 prompts + scheduled jobs)
+  # Docs: https://docs.openclaw.ai/
+  # Control UI: http://localhost:18789
+  # ---------------------------------------------------------------------------
+  openclaw:
+    build:
+      context: ./openclaw
+      dockerfile: Dockerfile
+    container_name: nse_openclaw
+    restart: unless-stopped
+    ports:
+      - "18789:18789"    # Control UI
+    env_file: .env
+    volumes:
+      - ./openclaw-config:/home/node/.openclaw
+      - ./data:/app/data
+      - ./logs/openclaw:/app/logs
+      - ./scripts:/app/scripts
+      - ./models:/app/models
+    depends_on:
+      openalgo:
+        condition: service_healthy
+    networks:
+      - trading_net
+
+  # ---------------------------------------------------------------------------
+  # Strategy Engine - Python service running model + strategy + daily jobs
+  # This is the core brain that connects data → model → OpenAlgo execution
+  # ---------------------------------------------------------------------------
+  strategy:
+    build:
+      context: .
+      dockerfile: Dockerfile.strategy
+    container_name: nse_strategy
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs/strategy:/app/logs
+      - ./scripts:/app/scripts
+      - ./config:/app/config
+    depends_on:
+      openalgo:
+        condition: service_healthy
+    networks:
+      - trading_net
+    # Default command: run the daily scheduler
+    command: ["python", "scripts/daily_start.py"]
+
+networks:
+  trading_net:
+    driver: bridge

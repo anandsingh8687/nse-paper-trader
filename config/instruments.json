@@ -1,0 +1,36 @@
+{
+  "core_indices": {
+    "NIFTY": {
+      "exchange": "NSE",
+      "symbol": "NIFTY 50",
+      "kite_token": 256265,
+      "options_exchange": "NFO",
+      "lot_size": 25,
+      "notes": "Nifty 50 index - core options trading"
+    },
+    "BANKNIFTY": {
+      "exchange": "NSE",
+      "symbol": "NIFTY BANK",
+      "kite_token": 260105,
+      "options_exchange": "NFO",
+      "lot_size": 15,
+      "notes": "Bank Nifty index - core options trading"
+    }
+  },
+  "satellite_universe": [
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
+    "HINDUNILVR", "ITC", "SBIN", "BHARTIARTL", "KOTAKBANK",
+    "LT", "AXISBANK", "ASIANPAINT", "MARUTI", "TITAN",
+    "SUNPHARMA", "BAJFINANCE", "WIPRO", "HCLTECH", "ULTRACEMCO",
+    "TECHM", "NTPC", "POWERGRID", "TATAMOTORS", "TATASTEEL",
+    "ONGC", "COALINDIA", "BAJAJFINSV", "ADANIENT", "ADANIPORTS",
+    "DRREDDY", "DIVISLAB", "CIPLA", "GRASIM", "APOLLOHOSP",
+    "EICHERMOT", "INDUSINDBK", "NESTLEIND", "JSWSTEEL", "BPCL",
+    "HEROMOTOCO", "TATACONSUM", "BRITANNIA", "SBILIFE", "HDFCLIFE",
+    "M&M", "UPL", "HINDALCO", "BAJAJ-AUTO", "SHREECEM"
+  ],
+  "vix_symbol": "INDIA VIX",
+  "vix_kite_token": 264969,
+  "max_satellite_picks": 5,
+  "notes": "Top 50 Nifty stocks as satellite universe. Daily ranking selects 3-5."
+}

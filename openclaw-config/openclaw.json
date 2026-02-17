@@ -1,0 +1,112 @@
+{
+  "_comment": "OpenClaw configuration for NSE Paper Trading System. All LLM prompts route to Kimi 2.5 via Moonshot OpenAI-compatible API.",
+
+  "models": {
+    "providers": {
+      "moonshot": {
+        "api": "openai-completions",
+        "baseUrl": "https://api.moonshot.ai/v1",
+        "apiKey": "${MOONSHOT_API_KEY}",
+        "models": {
+          "kimi-k2.5": {
+            "maxTokens": 4096,
+            "temperature": 0.6,
+            "contextWindow": 131072
+          },
+          "kimi-k2.5-thinking": {
+            "maxTokens": 8192,
+            "temperature": 1.0,
+            "contextWindow": 131072,
+            "extraBody": {
+              "chat_template_kwargs": {"thinking": true}
+            }
+          }
+        }
+      }
+    },
+    "defaults": {
+      "model": "moonshot/kimi-k2.5"
+    }
+  },
+
+  "agents": {
+    "defaults": {
+      "model": "moonshot/kimi-k2.5",
+      "systemPrompt": "You are an expert quantitative trading assistant for Indian NSE markets. You analyze data, generate insights, and help manage an intraday paper trading system. Be precise, data-driven, and actionable."
+    }
+  },
+
+  "skills": {
+    "trading_daily_brief": {
+      "description": "Generate daily 8:30 AM trading brief",
+      "model": "moonshot/kimi-k2.5",
+      "prompt": "You are the morning trading analyst. Process pre-market data (GIFT Nifty, VIX, OI changes), news sentiment scores, and ML model predictions to produce a concise daily trading brief. Output: market outlook, risk level, trade plan, and what to avoid. Format as numbered sections.",
+      "schedule": "30 8 * * 1-5",
+      "_comment": "Runs at 8:30 AM IST, Monday-Friday"
+    },
+    "trading_weekly_review": {
+      "description": "Weekly trade review and retrain suggestion",
+      "model": "moonshot/kimi-k2.5-thinking",
+      "prompt": "You are the weekly trading reviewer. Analyze the past 7 days of trade logs from the SQLite database. Calculate win rate, Sharpe, max drawdown, and average R-multiple. Identify patterns in losses. Suggest whether to retrain the model and any rule tweaks. Be specific with numbers.",
+      "schedule": "0 10 * * 0",
+      "_comment": "Runs at 10:00 AM IST every Sunday"
+    },
+    "sentiment_analyzer": {
+      "description": "Analyze news headlines for market sentiment",
+      "model": "moonshot/kimi-k2.5",
+      "prompt": "Analyze Indian market news headlines. Return JSON with: score (-1 to 1), label (bullish/bearish/neutral), key_themes (list), market_impact (high/medium/low), nifty_bias (up/down/flat), sectors_bullish (list), sectors_bearish (list)."
+    }
+  },
+
+  "integrations": {
+    "openalgo": {
+      "type": "http",
+      "baseUrl": "http://openalgo:5000",
+      "description": "OpenAlgo trading platform API for order execution and market data",
+      "endpoints": {
+        "placeOrder": "/api/v1/placeorder",
+        "cancelOrder": "/api/v1/cancelorder",
+        "orderBook": "/api/v1/orderbook",
+        "positions": "/api/v1/positionbook",
+        "holdings": "/api/v1/holdings"
+      }
+    },
+    "telegram": {
+      "type": "telegram",
+      "botToken": "${TELEGRAM_BOT_TOKEN}",
+      "chatId": "${TELEGRAM_CHAT_ID}",
+      "description": "Send trade alerts and daily briefs to Telegram"
+    }
+  },
+
+  "scheduledJobs": [
+    {
+      "name": "daily_trading_pipeline",
+      "description": "Run full daily trading pipeline at 8:00 AM IST",
+      "schedule": "0 8 * * 1-5",
+      "command": "python /app/scripts/daily_start.py",
+      "enabled": true
+    },
+    {
+      "name": "daily_brief",
+      "description": "Generate Kimi 2.5 daily brief at 8:30 AM IST",
+      "schedule": "30 8 * * 1-5",
+      "skill": "trading_daily_brief",
+      "enabled": true
+    },
+    {
+      "name": "weekly_review",
+      "description": "Weekly Kimi 2.5 trade review on Sunday",
+      "schedule": "0 10 * * 0",
+      "skill": "trading_weekly_review",
+      "enabled": true
+    },
+    {
+      "name": "auto_squareoff",
+      "description": "Emergency square-off check at 3:15 PM IST",
+      "schedule": "15 15 * * 1-5",
+      "command": "python /app/scripts/squareoff.py",
+      "enabled": true
+    }
+  ]
+}

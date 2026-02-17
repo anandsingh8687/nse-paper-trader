@@ -1,0 +1,48 @@
+# =============================================================================
+# Python Dependencies - NSE Paper Trading System
+# =============================================================================
+
+# --- LLM (Kimi 2.5 via OpenAI-compatible API) ---
+openai>=1.30.0
+
+# --- Zerodha Kite Connect ---
+kiteconnect>=5.0.0
+
+# --- NSE Data (replaces broken NSEPy) ---
+nsepython>=2.8
+jugaad-data>=0.25
+
+# --- ML Models ---
+scikit-learn>=1.4.0
+lightgbm>=4.3.0
+xgboost>=2.0.0
+joblib>=1.3.0
+
+# --- Data Processing ---
+pandas>=2.2.0
+numpy>=1.26.0
+ta>=0.11.0            # Technical analysis indicators (ATR, RSI, VWAP, etc.)
+
+# --- News & RSS ---
+feedparser>=6.0.0     # RSS feed parsing (Moneycontrol, ET)
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+
+# --- Database ---
+# sqlite3 is built-in to Python
+
+# --- Scheduling ---
+schedule>=1.2.0
+pytz>=2024.1
+
+# --- Telegram Alerts ---
+python-telegram-bot>=21.0
+
+# --- Environment ---
+python-dotenv>=1.0.0
+
+# --- Logging ---
+loguru>=0.7.0
+
+# --- Backtesting utilities ---
+matplotlib>=3.8.0     # For backtest result plots

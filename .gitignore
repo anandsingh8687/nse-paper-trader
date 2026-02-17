@@ -1,0 +1,39 @@
+# Environment
+.env
+*.env.local
+
+# Data (large files - download fresh)
+data/*.db
+data/*.parquet
+data/*.csv
+
+# Models (retrained locally)
+models/*.pkl
+models/*.json
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+.venv/
+
+# Docker
+db/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

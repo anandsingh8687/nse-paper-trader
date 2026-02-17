@@ -243,14 +243,24 @@ def run_setup_data():
     logger.info("=== FIRST-TIME DATA SETUP ===")
     init_db()
 
-    try:
-        kite = get_kite_client()
-        download_all_historical(kite)
-        download_vix_data(kite)
-        download_oi_data()
-    except Exception as e:
-        logger.error(f"Kite data download failed: {e}")
-        logger.info("You can still proceed with model training on available data.")
+    # Check if data already exists to avoid UNIQUE constraint errors on re-run
+    import sqlite3 as _sql
+    _conn = _sql.connect(DB_PATH)
+    _count = _conn.execute("SELECT COUNT(*) FROM candles_1min").fetchone()[0]
+    _conn.close()
+
+    if _count > 1000:
+        logger.info(f"Historical data already exists ({_count:,} candles). Skipping download.")
+        logger.info("To re-download, delete data/market_data.db first.")
+    else:
+        try:
+            kite = get_kite_client()
+            download_all_historical(kite)
+            download_vix_data(kite)
+            download_oi_data()
+        except Exception as e:
+            logger.error(f"Kite data download failed: {e}")
+            logger.info("You can still proceed with model training on available data.")
 
     # Compute features
     logger.info("Computing features...")

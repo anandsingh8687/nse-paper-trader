@@ -80,25 +80,23 @@ LOOKAHEAD_BARS = 6  # 6 x 5-min = 30 min lookahead for P(win) label
 # =============================================================================
 def generate_labels(df: pd.DataFrame, lookahead: int = LOOKAHEAD_BARS) -> pd.DataFrame:
     """
-    Create binary target: 1 if the NET return over the next `lookahead` bars
-    exceeds the cost threshold (profitable trade), 0 otherwise.
+    Create binary target: 1 if price goes UP, 0 if DOWN over next `lookahead` bars.
 
-    Uses close-to-close return (not max), which is more realistic for
-    actual trade P&L. The old approach (any bar exceeding 0.08%) produced
-    ~75% positive labels, making the model trivially biased.
+    IMPORTANT: Cost threshold (0.08%) is NOT applied here. That is handled by
+    the strategy engine's EV filter (MIN_EV_R >= 0.4R). The model's job is to
+    predict DIRECTION; the strategy decides if the edge beats costs.
 
-    RULE: EV calculation accounts for ~0.08% costs/slippage.
+    This gives ~50/50 balanced labels, which is essential for meaningful
+    precision and EV metrics. With imbalanced labels (e.g., 33/67), the model
+    achieves high accuracy by predicting the majority class while precision
+    on the minority class stays too low for positive EV.
     """
-    cost_threshold = 0.0008  # 0.08% round-trip costs
-
-    # Net return at lookahead horizon (close-to-close, not max)
+    # Net return at lookahead horizon (close-to-close)
     future_close = df["close"].shift(-lookahead)
     net_return = future_close / df["close"] - 1
 
-    # Also check downside: if max drawdown within window exceeds -1R (ATR),
-    # the trade would have been stopped out regardless of final close
-    # For simplicity, use net return as the primary signal
-    df[TARGET_COL] = (net_return > cost_threshold).astype(int)
+    # Predict direction: up (1) vs down (0)
+    df[TARGET_COL] = (net_return > 0).astype(int)
 
     # Drop rows where we can't compute the target
     df.dropna(subset=[TARGET_COL], inplace=True)
@@ -222,16 +220,26 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) 
     # P(win) from model predictions on positive class
     p_win = y_prob[y_pred == 1].mean() if (y_pred == 1).any() else 0.0
 
-    # EV aligned with strategy_engine.compute_ev():
-    # EV = P(win) * avg_win_R - (1 - P(win)) * 1R - costs_R
-    # Using precision as P(win) (correct when we predict positive)
-    # avg_win = 0.8R (conservative, matching SCALE_OUT_TARGET_R)
-    win_rate = precision  # Precision = how often we're right when we predict positive
-    avg_win_r = 0.8    # RULE: Scale out at +0.8R (from strategy_engine)
+    # EV: simulate actual strategy behavior
+    # Only count predictions where model confidence >= 60% (MIN_P_WIN threshold)
+    # This matches what the strategy engine would actually trade
+    high_conf_mask = y_prob >= 0.60  # Strategy only trades when P(win) >= 60%
+    if high_conf_mask.any():
+        hc_actual = y_true[high_conf_mask]
+        hc_pred = y_pred[high_conf_mask]
+        hc_win_rate = (hc_actual == 1).mean()  # Actual win rate among high-confidence calls
+        n_high_conf = int(high_conf_mask.sum())
+    else:
+        hc_win_rate = 0.5
+        n_high_conf = 0
+
+    # EV = win_rate * 0.8R - loss_rate * 1.0R - costs
+    # (aligned with strategy_engine.compute_ev)
+    avg_win_r = 0.8    # RULE: Scale out at +0.8R
     avg_loss_r = 1.0   # RULE: Hard SL at -1R
     costs_r = 0.08     # ~0.08% round-trip as fraction of 1R
 
-    ev = win_rate * avg_win_r - (1 - win_rate) * avg_loss_r - costs_r
+    ev = hc_win_rate * avg_win_r - (1 - hc_win_rate) * avg_loss_r - costs_r
 
     # Sharpe approximation from prediction returns
     # Each correct prediction = +1R, incorrect = -1R
@@ -246,10 +254,11 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) 
         "precision": round(precision, 4),
         "recall": round(recall, 4),
         "f1": round(f1, 4),
-        "win_rate": round(win_rate, 4),
+        "hc_win_rate": round(hc_win_rate, 4),
         "ev": round(ev, 4),
         "sharpe": round(sharpe, 4),
         "p_win_avg": round(p_win, 4),
+        "n_high_conf": n_high_conf,
         "n_predictions": int(y_pred.sum()),
         "n_total": len(y_true),
     }

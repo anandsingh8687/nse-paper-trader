@@ -84,7 +84,15 @@ def kimi_chat(
 
     try:
         response = client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content.strip()
+        msg = response.choices[0].message
+        content = msg.content or ""
+
+        # Kimi K2.5 thinking mode may return content in reasoning_content
+        # while the main content field is empty
+        if not content.strip() and hasattr(msg, "reasoning_content"):
+            content = msg.reasoning_content or ""
+
+        return content.strip()
     except Exception as e:
         logger.error(f"Kimi 2.5 API error: {e}")
         return f"[KIMI_ERROR] {str(e)}"
@@ -152,7 +160,7 @@ Results:
 
 Be concise (max 300 words). Focus on actionable insights."""
 
-    return kimi_chat(prompt, thinking=True, max_tokens=1024)
+    return kimi_chat(prompt, thinking=False, max_tokens=1024)
 
 
 def kimi_daily_brief(

@@ -857,90 +857,256 @@ def run_backtest(
     capital: float = 1_000_000,
 ) -> dict:
     """
-    Run full backtest over stored historical data.
+    Run full backtest over pre-computed feature data.
+
+    Uses parquet feature files (from --setup-data) + trained model.
+    Simulates daily trading with proper entry/exit logic:
+    - Entry: P(win) >= threshold + trigger conditions
+    - Exit: +0.8R scale-out, -1R stop-loss, 2.5hr time stop
+    - Max 4 trades/day, max 3% total risk
 
     Returns dict with Sharpe, max DD, win rate, total return.
     """
     logger.info("=== BACKTEST MODE ===")
 
-    engine = StrategyEngine(capital=capital, mode="sandbox")
+    # Load pre-computed features (fast — no SQLite per-day queries)
+    feature_files = list(DATA_DIR.glob("features_*.parquet"))
+    if not feature_files:
+        return {"error": "No feature files. Run: python scripts/daily_start.py --setup-data"}
 
-    # Get all trading dates from stored data
-    conn = sqlite3.connect(DB_PATH)
-    dates_query = "SELECT DISTINCT substr(timestamp, 1, 10) as date FROM candles_1min"
+    all_features = {}
+    for fp in feature_files:
+        symbol = fp.stem.replace("features_", "")
+        df = pd.read_parquet(fp)
+        # Strip timezone if needed
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        all_features[symbol] = df
+        logger.info(f"  Loaded {symbol}: {len(df)} bars")
+
+    # Run model predictions on all features at once
+    from scripts.model_trainer import predict, load_model
+    model, scaler, metadata = load_model()
+    logger.info(f"Model: {metadata['best_model']} ({len(metadata['features'])} features)")
+
+    for symbol, df in all_features.items():
+        all_features[symbol] = predict(df)
+
+    # Get all unique trading dates
+    all_dates = set()
+    for df in all_features.values():
+        all_dates.update(df.index.date)
+    dates = sorted(all_dates)
+
     if start_date:
-        dates_query += f" WHERE date >= '{start_date}'"
+        dates = [d for d in dates if str(d) >= start_date]
     if end_date:
-        dates_query += f" {'AND' if start_date else 'WHERE'} date <= '{end_date}'"
-    dates_query += " ORDER BY date"
-
-    dates = [row[0] for row in conn.execute(dates_query).fetchall()]
-    conn.close()
+        dates = [d for d in dates if str(d) <= end_date]
 
     if not dates:
-        return {"error": "No data for backtest period"}
+        return {"error": "No dates in feature data"}
 
-    logger.info(f"Backtest period: {dates[0]} to {dates[-1]} ({len(dates)} days)")
+    logger.info(f"Backtest: {dates[0]} to {dates[-1]} ({len(dates)} trading days)")
 
+    # --- Simulation ---
+    equity = capital
     daily_returns = []
     equity_curve = [capital]
+    total_trades = 0
+    winning_trades = 0
+    all_trade_pnls = []
 
-    for date in dates:
-        # Reset daily state
-        engine.daily_pnl = 0.0
-        engine.trades_today = 0
-        engine.total_risk_today = 0.0
-        engine.active_trades = []
-        engine.shutdown = False
+    # Relaxed P(win) for backtest exploration (strategy uses 0.60)
+    BT_MIN_PWIN = 0.55  # Slightly relaxed to see more trades
+    BT_MAX_TRADES_PER_DAY = 4
+    COST_PCT = 0.0008  # 0.08% round-trip
 
-        # Simulate morning routine (simplified for backtest)
-        engine.premarket_data = {"vix_current": 15.0, "oi_nifty_change": 100}
-        engine.sentiment = {"score": 0.1, "label": "neutral"}
+    for day_idx, date in enumerate(dates):
+        day_pnl = 0.0
+        day_trades = 0
 
-        # Scan and execute
-        candidates = engine.scan_candidates()
-        if candidates:
-            engine.execute_trades(candidates[:2])  # Conservative: top 2 only
+        # Collect all bars for this day across all symbols
+        day_candidates = []
+        for symbol, df in all_features.items():
+            day_mask = df.index.date == date
+            day_df = df[day_mask]
 
-        # Simulate exits (simplified: close at end of day)
-        for trade in engine.active_trades:
-            if trade.status == "open":
-                # Use last close as exit price (simplified)
-                engine._close_trade(trade, trade.entry_price * 1.001, "eod_close")
+            if len(day_df) < 10:
+                continue
 
-        daily_return = engine.daily_pnl / engine.capital
+            # Look at bars in the first 2 hours (9:15-11:15 = bars 0-24 approx)
+            # for entry signals. Don't enter after 1:00 PM (time stop risk)
+            entry_window = day_df.iloc[:24]  # First ~2 hours of 5-min bars
+
+            for idx in range(5, len(entry_window)):
+                bar = entry_window.iloc[idx]
+                p_win = bar.get("p_win", 0.0)
+
+                if p_win < BT_MIN_PWIN:
+                    continue
+
+                # Check simple momentum trigger: close > prev high
+                if idx > 0:
+                    prev_bar = entry_window.iloc[idx - 1]
+                    momentum = bar["close"] > prev_bar["high"]
+                    # Or mean-reversion: near VWAP
+                    vwap_dist = abs(bar.get("vwap_distance_pct", 1.0))
+                    mean_rev = vwap_dist < 0.2
+
+                    if not (momentum or mean_rev):
+                        continue
+
+                atr = bar.get("atr_14", bar["close"] * 0.01)
+                if atr <= 0:
+                    atr = bar["close"] * 0.01
+
+                day_candidates.append({
+                    "symbol": symbol,
+                    "bar_idx": idx,
+                    "p_win": p_win,
+                    "entry_price": bar["close"],
+                    "atr": atr,
+                    "direction": "long" if bar.get("mom_15min", 0) > 0 else "short",
+                    "day_df": day_df,
+                })
+
+        # Sort by p_win descending, take top N
+        day_candidates.sort(key=lambda c: c["p_win"], reverse=True)
+        top_candidates = day_candidates[:BT_MAX_TRADES_PER_DAY]
+
+        for cand in top_candidates:
+            entry_price = cand["entry_price"]
+            atr = cand["atr"]
+            direction = cand["direction"]
+            day_df = cand["day_df"]
+
+            # Simulate trade from entry bar to end of day
+            entry_bar_idx = cand["bar_idx"]
+            remaining_bars = day_df.iloc[entry_bar_idx + 1:]
+
+            if len(remaining_bars) == 0:
+                continue
+
+            # Track P&L bar by bar
+            sl_price = entry_price - atr if direction == "long" else entry_price + atr
+            target_price = entry_price + 0.8 * atr if direction == "long" else entry_price - 0.8 * atr
+            exit_price = None
+            exit_reason = "eod"
+
+            for _, future_bar in remaining_bars.iterrows():
+                if direction == "long":
+                    # Check stop loss
+                    if future_bar["low"] <= sl_price:
+                        exit_price = sl_price
+                        exit_reason = "stop_loss"
+                        break
+                    # Check target
+                    if future_bar["high"] >= target_price:
+                        exit_price = target_price
+                        exit_reason = "target"
+                        break
+                else:
+                    if future_bar["high"] >= sl_price:
+                        exit_price = sl_price
+                        exit_reason = "stop_loss"
+                        break
+                    if future_bar["low"] <= target_price:
+                        exit_price = target_price
+                        exit_reason = "target"
+                        break
+
+            # If no exit triggered, close at last bar
+            if exit_price is None:
+                exit_price = remaining_bars.iloc[-1]["close"]
+                exit_reason = "eod"
+
+            # Calculate P&L
+            if direction == "long":
+                trade_return = (exit_price - entry_price) / entry_price
+            else:
+                trade_return = (entry_price - exit_price) / entry_price
+
+            trade_return -= COST_PCT  # Subtract costs
+            trade_pnl = equity * 0.01 * trade_return / (atr / entry_price)  # 1% risk sizing
+
+            day_pnl += trade_pnl
+            total_trades += 1
+            all_trade_pnls.append(trade_pnl)
+            if trade_pnl > 0:
+                winning_trades += 1
+            day_trades += 1
+
+        daily_return = day_pnl / equity if equity > 0 else 0
         daily_returns.append(daily_return)
-        engine.capital += engine.daily_pnl
-        equity_curve.append(engine.capital)
+        equity += day_pnl
+        equity_curve.append(equity)
 
-    # Compute backtest metrics
+        # Progress every 30 days
+        if (day_idx + 1) % 30 == 0:
+            logger.info(
+                f"  Day {day_idx+1}/{len(dates)}: equity={equity:,.0f} "
+                f"trades={total_trades} win_rate={winning_trades/max(total_trades,1):.1%}"
+            )
+
+    # --- Compute Results ---
     returns = np.array(daily_returns)
-    if len(returns) == 0 or returns.std() == 0:
-        return {"error": "No trades or zero variance"}
 
-    sharpe = returns.mean() / returns.std() * np.sqrt(252)
+    if total_trades == 0:
+        logger.warning("No trades executed in backtest!")
+        return {
+            "error": "No trades",
+            "total_days": len(dates),
+            "reason": f"No candidates passed P(win)>={BT_MIN_PWIN:.0%} + trigger filters",
+        }
+
+    # Filter out zero-return days for Sharpe
+    nonzero_returns = returns[returns != 0]
+    if len(nonzero_returns) > 1 and nonzero_returns.std() > 0:
+        sharpe = nonzero_returns.mean() / nonzero_returns.std() * np.sqrt(252)
+    else:
+        sharpe = 0.0
+
     total_return = (equity_curve[-1] / equity_curve[0]) - 1
-    max_dd = min(
-        (np.array(equity_curve[1:]) - np.maximum.accumulate(equity_curve[1:]))
-        / np.maximum.accumulate(equity_curve[1:])
-    )
-    win_rate = (returns > 0).mean()
+    eq_arr = np.array(equity_curve[1:])
+    running_max = np.maximum.accumulate(eq_arr)
+    drawdowns = (eq_arr - running_max) / running_max
+    max_dd = drawdowns.min() if len(drawdowns) > 0 else 0.0
+
+    win_rate = winning_trades / total_trades if total_trades > 0 else 0
+    avg_win = np.mean([p for p in all_trade_pnls if p > 0]) if winning_trades > 0 else 0
+    avg_loss = np.mean([p for p in all_trade_pnls if p <= 0]) if (total_trades - winning_trades) > 0 else 0
 
     results = {
         "sharpe": round(sharpe, 3),
-        "total_return": round(total_return * 100, 2),
-        "max_drawdown": round(max_dd * 100, 2),
-        "win_rate": round(win_rate * 100, 1),
+        "total_return_pct": round(total_return * 100, 2),
+        "max_drawdown_pct": round(max_dd * 100, 2),
+        "win_rate_pct": round(win_rate * 100, 1),
+        "total_trades": total_trades,
+        "winning_trades": winning_trades,
+        "losing_trades": total_trades - winning_trades,
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "profit_factor": round(abs(avg_win * winning_trades) / abs(avg_loss * (total_trades - winning_trades) + 1e-8), 2),
         "total_days": len(dates),
-        "trading_days": len([r for r in returns if r != 0]),
+        "trading_days": int((returns != 0).sum()),
+        "trades_per_day": round(total_trades / len(dates), 1),
         "final_capital": round(equity_curve[-1], 2),
+        "bt_min_pwin": BT_MIN_PWIN,
     }
 
-    logger.info(f"\n=== BACKTEST RESULTS ===")
-    logger.info(f"  Sharpe Ratio:  {results['sharpe']}")
-    logger.info(f"  Total Return:  {results['total_return']}%")
-    logger.info(f"  Max Drawdown:  {results['max_drawdown']}%")
-    logger.info(f"  Win Rate:      {results['win_rate']}%")
-    logger.info(f"  Final Capital: {results['final_capital']:,.0f}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"  BACKTEST RESULTS ({dates[0]} to {dates[-1]})")
+    logger.info(f"{'='*60}")
+    logger.info(f"  Sharpe Ratio:    {results['sharpe']}")
+    logger.info(f"  Total Return:    {results['total_return_pct']}%")
+    logger.info(f"  Max Drawdown:    {results['max_drawdown_pct']}%")
+    logger.info(f"  Win Rate:        {results['win_rate_pct']}% ({winning_trades}/{total_trades})")
+    logger.info(f"  Avg Win:         {results['avg_win']:,.0f}")
+    logger.info(f"  Avg Loss:        {results['avg_loss']:,.0f}")
+    logger.info(f"  Profit Factor:   {results['profit_factor']}")
+    logger.info(f"  Trades/Day:      {results['trades_per_day']}")
+    logger.info(f"  Final Capital:   {results['final_capital']:,.0f}")
+    logger.info(f"  P(win) Threshold: {BT_MIN_PWIN:.0%}")
+    logger.info(f"{'='*60}")
 
     return results

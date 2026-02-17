@@ -508,7 +508,9 @@ def predict(features_df: pd.DataFrame) -> pd.DataFrame:
 
     available = [c for c in feature_cols if c in features_df.columns]
     X = features_df[available].fillna(0)
-    X_scaled = scaler.transform(X)
+    X_scaled = pd.DataFrame(
+        scaler.transform(X), columns=available, index=X.index
+    )
 
     features_df["p_win"] = model.predict_proba(X_scaled)[:, 1]
     features_df["prediction"] = model.predict(X_scaled)
